@@ -7,16 +7,16 @@ states &#61; &#91;some_initial_value for _ in 1:nthreads&#40;&#41;&#93;
     new_val &#61; some_operator&#40;old_val, f&#40;x&#41;&#41;
     states&#91;tid&#93; &#61; new_val
 end
-do_something&#40;states&#41;</code></pre> <p>The above code is <strong>incorrect</strong> because the tasks spawned by <code>@threads</code> are allowed to yield to other tasks during their execution. This means that between reading <code>old_val</code> and storing <code>new_val</code> in the storage, the task could be paused and a new task running on the same thread with the same <code>threadid&#40;&#41;</code> could concurrently write to <code>states&#91;tid&#93;</code>, causing a race condition and thus work being lost.</p> <p>This is not actually a problem with multithreading specifically, but really a concurrency problem, and it can be demonstrated even with a single thread. For example:</p> <pre><code class=language-julia >&#36; julia --threads&#61;1</code></pre>
+do_something&#40;states&#41;</code></pre> <p>The above code is <strong>incorrect</strong> because the tasks spawned by <code>@threads</code> are allowed to yield to other tasks during their execution<sup id="fnref:yielding"><a href="#fndef:yielding" class=fnref >[2]</a></sup>. This means that between reading <code>old_val</code> and storing <code>new_val</code> in the storage, the task could be paused and a new task running on the same thread with the same <code>threadid&#40;&#41;</code> could concurrently write to <code>states&#91;tid&#93;</code>, causing a race condition and thus work being lost.</p> <p>This is not actually a problem with multithreading specifically, but really a concurrency problem, and it can be demonstrated even with a single thread. For example:</p> <pre><code class=language-julia >&#36; julia --threads&#61;1</code></pre>
 <pre><code class=language-julia >julia&gt; f&#40;i&#41; &#61; &#40;sleep&#40;0.001&#41;; i&#41;;
 
 julia&gt; let state &#61; &#91;0&#93;, N&#61;100
            @sync for i ∈ 1:N
                Threads.@spawn begin
-                   tid &#61; Threads.threadid&#40;&#41;
-                   old_var &#61; state&#91;tid&#93;
-                   new_var &#61; old_var &#43; f&#40;i&#41;
-                   state&#91;tid&#93; &#61; new_var
+                   tid &#61; Threads.threadid&#40;&#41;  # each task gets &#96;tid &#61; 1&#96;
+                   old_var &#61; state&#91;tid&#93;      # each task reads the current value, which for all is 0 &#40;&#33;&#41; because...
+                   new_var &#61; old_var &#43; f&#40;i&#41;  # ...the &#96;sleep&#96; in &#96;f&#96; causes all tasks to pause *simultaneously* here &#40;all loop iterations start, but do not yet finish&#41;
+                   state&#91;tid&#93; &#61; new_var      # after being released from the &#96;sleep&#96;, each task sets &#96;state&#91;1&#93;&#96; to &#96;i&#96;
                end
            end
            sum&#40;state&#41;, sum&#40;1:N&#41;
@@ -48,7 +48,8 @@ data_chunks &#61; partition&#40;some_data, chunk_size&#41; # partition your data
 # See also ChunkSplitters.jl and SplittablesBase.jl for partitioning data
 
 tasks &#61; map&#40;data_chunks&#41; do chunk
-    # Each chunk of your data gets its own spawned task that does its own local work and returns a result
+    # Each chunk of your data gets its own spawned task that does its own local, sequential work
+    # and then returns the result
     @spawn begin
         state &#61; some_initial_value
         for x in chunk
@@ -70,8 +71,8 @@ function tmapreduce&#40;f, op, itr; chunks_per_thread::Int &#61; 2, kwargs...&#4
     end
     mapreduce&#40;fetch, op, tasks; kwargs...&#41;
 end</code></pre>
-<p>In <code>tmapreduce&#40;f, op, itr&#41;</code>, the function <code>f</code> is applied to each element of <code>itr</code>, and then an <em>associative</em><sup id="fnref:assoc"><a href="#fndef:assoc" class=fnref >[2]</a></sup> two-argument function <code>op</code>.</p>
-<p>The above <code>tmampreduce</code> can hopefully be added to base Julia at some point in the near future. In the meantime however it&#39;s somewhat simple to write your own as above.</p>
+<p>In <code>tmapreduce&#40;f, op, itr&#41;</code>, the function <code>f</code> is applied to each element of <code>itr</code>, and then an <em>associative</em><sup id="fnref:assoc"><a href="#fndef:assoc" class=fnref >[3]</a></sup> two-argument function <code>op</code>.</p>
+<p>The above <code>tmapreduce</code> can hopefully be added to base Julia at some point in the near future. In the meantime however it&#39;s somewhat simple to write your own as above.</p>
 <h3 id=another_option_use_a_package_which_handles_this_correctly ><a href="#another_option_use_a_package_which_handles_this_correctly">Another option: Use a package which handles this correctly</a></h3>
 <p>We encourage people to check out various multithreading libraries like <a href="https://github.com/JuliaFolds2/Transducers.jl">Transducers.jl</a> &#40;or various frontends like <a href="https://github.com/tkf/ThreadsX.jl">ThreadsX.jl</a>, <a href="https://github.com/JuliaFolds/FLoops.jl">FLoops.jl</a>, and <a href="https://github.com/JuliaFolds/Folds.jl">Folds.jl</a>&#41;,  and <a href="https://github.com/JuliaConcurrent/MultiThreadedCaches.jl">MultiThreadedCaches.jl</a>.</p>
 <h4 id=transducersjl_ecosystem ><a href="#transducersjl_ecosystem">Transducers.jl ecosystem</a></h4>
@@ -137,9 +138,20 @@ out</code></pre>
 </ol>
 <p>Any code that relies on a specific <code>threadid</code> staying constant, or on a constant number of threads during execution, is bound to be incorrect. As a rule of thumb, programmers should at most be querying the number of threads to motivate heuristics like how to distribute parallel work, but programs should generally <strong>not</strong> be written to depend on implementation details of threads for correctness. Rather, programmers should reason about <em>tasks</em>, i.e. pieces of work that may execute concurrently with other code, independently of the number of <em>threads</em> that are used for executing them.</p></div>
 <br/>
+<table class=fndef  id="fndef:yielding">
+    <tr>
+        <td class=fndef-backref ><a href="#fnref:yielding">[2]</a>
+        <td class=fndef-content ><h4>Don&#39;t try to reason about yielding</h4>
+    
+</table>
+
+<div class=long-footnote ><p>Many existing uses of thread local state happen to be relatively robust and give correct answers only because the functions they are calling during execution do not yield. One may then think &quot;well, I can just avoid this problem by making sure my code doesn&#39;t yield&quot;, but we think this is a bad and unsustainable idea, because whether or not a function call will yield is not stable, obvious, or easily inspectable.</p>
+<p>For instance, if a function <code>f</code> is updated to include a background <code>@debug</code> statement or other forms of non-user-visible IO, it may change from being non-yielding to yielding. If during a call to <code>f</code>, the compiler encounters a dynamic dispatch where new code must be JIT compiled, a yield-point may be encountered, and any number of other internal changes could happen to code which can cause it to yielding.</p>
+<p>Furthermore, future versions of julia may eventually move away from a <a href="https://en.wikipedia.org/wiki/Cooperative_multitasking">cooperative task model</a> to a &#91;preemptive task model&#93;&#40;https://en.wikipedia.org/wiki/Preemption_&#40;computing&#41;, in which case yield points would not be the only way that race conditions like this could be encountered.</p></div>
+<br/>
 <table class=fndef  id="fndef:assoc">
     <tr>
-        <td class=fndef-backref ><a href="#fnref:assoc">[2]</a>
+        <td class=fndef-backref ><a href="#fnref:assoc">[3]</a>
         <td class=fndef-content ><h4>Associativity</h4>
     
 </table>
